@@ -1,7 +1,7 @@
 
 # coding: utf-8
 
-# In[11]:
+# In[26]:
 
 
 import proj_helpers.FinObj as fin
@@ -9,14 +9,14 @@ import numpy as np
 import proj_helpers.riskEngine as risk
 
 
-# In[12]:
+# In[27]:
 
 
 #Map for units of time
 t_map = {'2y':0.5,'year':1,'semester':2,'quarter':4,'month':12,'week':52,'2day':180,'day':360}
 
 
-# In[13]:
+# In[28]:
 
 
 #MC Parameters
@@ -27,13 +27,13 @@ t_unit = 200 #Unit of time: default = 1 for years, 12 for months, 360 for days e
 time_s = 200 #Total number of time steps in t_units
 
 
-# In[14]:
+# In[35]:
 
 
 #Stock Parameters
 spot = 100
 vol = 0.20 #vol per year
-rate = 0.05 #Rate in years
+rate = 0.02 #Rate in years
 div = 0.0
 expr = time_s/t_unit
 
@@ -41,7 +41,7 @@ expr = time_s/t_unit
 share1 = fin.Stock(spot,vol,t_unit,rate)
 
 
-# In[15]:
+# In[30]:
 
 
 strike=100
@@ -50,10 +50,8 @@ payoff=fin.amCallVec #Define option payoff
 #Option Parameters
 myOption = fin.Option(share1,payoff,time_s,strike,t_unit)
 
-callbs=risk.BSPut(spot, strike, div, rate, vol, expr) #Compute black scholes price
 
-
-# In[ ]:
+# In[31]:
 
 
 #Plot BS call vs. LSM call against spot
@@ -68,11 +66,11 @@ for s in spots:
     print("Spot : " + str(s) + " BS Price : " + str(call_bs[s]) + " LSM Price " + str(call_lsm[s]))
 
 
-# In[ ]:
+# In[32]:
 
 
-pplot.plot(spots,call_bs.values(),label='Black Scholes')
-pplot.plot(spots,call_lsm.values(),label='My LSM')
+pplot.plot(spots,call_bs.values(),label='Black Scholes Call')
+pplot.plot(spots,call_lsm.values(),label='My LSM Call')
 pplot.legend()
 pplot.xlabel('Spot')
 pplot.ylabel('Price')
@@ -80,6 +78,35 @@ pplot.show()
 
 
 # In[ ]:
+
+
+payoff=fin.amPutVec #Define option payoff
+
+#Option Parameters
+myOption = fin.Option(share1,payoff,time_s,strike,t_unit)
+
+spots=np.linspace(40,120,30)
+put_bs = {}
+put_lsm = {}
+for s in spots:
+    put_bs[s] = risk.BSPut(s, strike, div, rate, vol, expr)
+    share1.setSpot(s) #Change spot price for LSM
+    put_lsm[s] = fin.priceLSM(share1,myOption,paths,time_s,t_unit,anti=True,num_basis=4)
+    print("Spot : " + str(s) + " BS Price : " + str(put_bs[s]) + " LSM Price " + str(put_lsm[s]))
+
+
+# In[ ]:
+
+
+pplot.plot(spots,put_bs.values(),label='Black Scholes Put')
+pplot.plot(spots,put_lsm.values(),label='My LSM Put')
+pplot.legend()
+pplot.xlabel('Spot')
+pplot.ylabel('Price')
+pplot.show()
+
+
+# In[18]:
 
 
 # #Test against BS Call Price for paths
@@ -94,7 +121,7 @@ pplot.show()
 #          +" LSM Price : "+str(call_p[paths])+" BS Price : "+str(callbs))
 
 
-# In[ ]:
+# In[19]:
 
 
 # #Test against BS Call Price for time steps
