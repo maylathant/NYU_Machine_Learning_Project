@@ -92,7 +92,7 @@ def amPutVec(spot,op):
     spot : vector of spot prices
     '''
     result = op.strike - spot
-    return result * (result > 0) #Takes max between 0 and value
+    return result * (result > 0.0) #Takes max between 0 and value
 
 #American put payoff
 def amPut(spot,op):
@@ -108,7 +108,7 @@ def amCallVec(spot,op):
     spot : vector of spot prices
     '''
     result = spot - op.strike
-    return result * (result > 0) #Takes max between 0 and value
+    return result * (result > 0.0) #Takes max between 0 and value
 
 #Vanilla call payoff
 def vanCall(stock, spot , auto, t):
@@ -299,6 +299,8 @@ def getCont(Ct1,St,num_basis):
     num_basis : number of basis elements to use
     moneymask : index of paths in the money at t
     '''
+    if len(St) == 0: return np.array([]) #If no paths are in the money
+
     basis=np.eye(num_basis)
     #Evaluate St at laguerre basis
     X=np.array([np.polynomial.laguerre.lagval(St,basis[x]) for x in range(0,num_basis)])
@@ -319,12 +321,12 @@ def getPV(C,g,P):
     '''
     return g if C<g else P
 
-def getPayoffs(Pt1,Ct0,Ct,moneymask): #Slowest function in the bunch
+def getPayoffs(Pt1,Ct0,Ct,moneymask):
     '''
     Compute payoffs at t
     Pt1 : payoffs discounted t+1
     Ct0 : current payoffs
-    Ct : continuation values for ITM paths only, assumed dictionary with index
+    Ct : continuation values
     referencing paths in the money
     moneymask : index of in the money paths
     '''
@@ -415,9 +417,9 @@ def mc_Bridge(xt,stock,t,wt):
     t : tuple containing t and t+1 times
     wt : random normal
     '''
-    return xt*(t[0]/t[1]) + xt*stock.vol*np.sqrt(t[0]/t[1])*wt
+    return xt*(t[0]/t[1]) + stock.vol*np.sqrt(t[0]/t[1])*wt
 
-def mc_BridgeVec(xt,stock,t,wt):
+def mc_BridgeVec(xt,stock,t,wt,dt=1):
     '''
     Walk one step back on brownian bridge
     xt : values at t+1
@@ -425,7 +427,7 @@ def mc_BridgeVec(xt,stock,t,wt):
     t : tuple containing t and t+1 times
     wt : vector of random normals
     '''
-    return xt*(t[0]/t[1]) + xt*stock.vol*np.sqrt(t[0]/t[1])*wt
+    return xt*(t[0]/t[1]) + stock.vol*np.sqrt(dt*t[0]/t[1])*wt
 
 def jumpEx(stock,wt,T):
     '''
@@ -434,11 +436,11 @@ def jumpEx(stock,wt,T):
     wt : random standard normal variable(s)
     T : time to elapse
     '''
-    return (stock.repo-stock.vol*stock.vol/2)*T + stock.vol*wt
+    return (stock.repo-stock.vol*stock.vol/2)*T + stock.vol*np.sqrt(T)*wt
 
 
 def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
- scheme=mc_Time,anti=False,num_basis=5):
+ anti=False,num_basis=5):
     '''
     Compute american payoff via LSM with brownian bridge
     stock : stock object
@@ -446,7 +448,6 @@ def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
     paths : number of MC paths
     t_steps : number of time steps per path
     t_del : size of each time step
-    scheme : monte carlo scheme. For instance, mc_Time = Euler
     anti : boolean to trigger antithetical variates ~ Will run
     double the amount of paths
     num_basis : number of basis vectors to use in Laguerre expansion
@@ -470,6 +471,7 @@ def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
     #FO = np.array([opt.payoff(x,opt) for x in FP]) #Final Payoff
     FO = opt.payoff(FP,opt) #Final Payoff
 
+    #dt = 1/t_steps
 
     #Rescale stock and option to normal time step
     stock.rescale(t_unit)
@@ -483,10 +485,10 @@ def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
 
 
     #Start walk back
-    for t in reversed(range(0,t_steps-1)):
+    for t in reversed(range(1,t_steps+1)):
         t0 = time.time()
         #Xt = np.array([mc_Bridge(p,stock,(t+1,t+2),x) for x,p in zip(sim_ran[:,t-1],Xt)]) #Current state
-        Xt = mc_BridgeVec(Xt,stock,(t+1,t+2),sim_ran[:,t-1])
+        Xt = mc_BridgeVec(Xt,stock,(t-1,t),sim_ran[:,t-2])
         timings[1] = t0 - time.time()
 
         t0 = time.time()
@@ -500,6 +502,7 @@ def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
 
         t0 = time.time()
         moneymask = np.where(Ct0>0.0)[0] #Filter for ITM options
+        if t == 2 and len(moneymask) == 0: print("Warning: No Paths in the Money. Price May Round to Zero.")
         timings[4] = t0 - time.time()
 
         FO = FO*dr #Get discounted payoffs for in the money paths
@@ -508,19 +511,34 @@ def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
         Ct = np.zeros(paths)
         Ct[moneymask] = getCont(FO[moneymask],St[moneymask],num_basis) #Obtain continuation values
         timings[5] = t0 - time.time()
-        #Ct = {x:c for x,c in zip(moneymask,Ct)} #Transform into index
-        
+
+
         t0 = time.time()
         FO = getPayoffs(FO,Ct0,Ct,moneymask) #Current payoffs
+        
         timings[6] = t0 - time.time()
-
-        FP = St #Reset share prices for next iteration
 
         # print("Initialization  Time : " + str(timings[0]) + " Current State Calc : " + str(timings[1])\
         #     + " Transfrom Xt to St : " + str(timings[2]) + " Compute Option Payoff : " + str(timings[3])\
         # + " Filter moneymask : " + str(timings[4]) + " Continuation Compute : " + str(timings[5]) \
         # + " Compute Payoffs : " + str(timings[6]))
 
+    FO = FO*dr #Discount to last time step
 
     return FO
+
+def priceLSM(stock, opt, paths, t_steps, t_unit,anti=False,num_basis=5):
+    '''
+    LSM with brownian bridge
+    stock : stock object
+    opt : option object
+    paths : number of MC paths
+    t_steps : number of time steps per path
+    t_del : size of each time step
+    scheme : monte carlo scheme. For instance, mc_Time = Euler
+    anti : boolean to trigger antithetical variates ~ Will run
+    double the amount of paths
+    num_basis : number of basis vectors to use in Laguerre expansion
+    '''
+    return np.mean(bridgePayoffs(stock, opt, paths, t_steps, t_unit,anti,num_basis))
 
