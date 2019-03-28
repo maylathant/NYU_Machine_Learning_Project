@@ -160,3 +160,19 @@ def BSPut(spot = 100, strike = 100, div = 0, rate = 0, vol = 0.15, time = 1):
 
 	result = sp.norm.cdf(-d2)*strike*np.exp(-rate*time)
 	return result - spot*np.exp(-time*div)*sp.norm.cdf(-d1)
+
+def BSPutDig(spot = 100, strike = 100, div = 0, rate = 0, vol = 0.15, time = 1):
+	'''
+	Compute the price of digital vanilla put
+	'''
+	d1 = getd1(spot, strike, div, rate, vol, time)
+	d2 = d1 - vol*np.sqrt(time)
+	return np.exp(-rate*time)*sp.norm.cdf(-d2)
+
+def BSCallDig(spot = 100, strike = 100, div = 0, rate = 0, vol = 0.15, time = 1):
+	'''
+	Compute the price of digital vanilla call
+	'''
+	d1 = getd1(spot, strike, div, rate, vol, time)
+	d2 = d1 - vol*np.sqrt(time)
+	return np.exp(-rate*time)*sp.norm.cdf(d2)

@@ -5,6 +5,8 @@
 import numpy as np
 import time
 import sys
+from sklearn.ensemble import RandomForestRegressor
+import pickle
 
 class Stock:
     def __init__(self, spot, vol, t_unit=1, repo=0.0):
@@ -33,13 +35,18 @@ class Option:
     '''
     Payoff is a function that describes the payoff
     of the option
+    birthday : dictionary with rng and pay elements
+        rng represents the range from the strike price in ascending order
+        pay represents the payoff for the corresponding range
     '''
-    def __init__(self, stock, payoff, exp, strike=100, t_unit=1):
+    def __init__(self, stock, payoff, exp, strike=100, t_unit=1,\
+     birthday={"rng":[5,10,15],"pay":[1.0,0.5,0.25]}):
         self.stock = stock #Underlying
         self.payoff = payoff #Payoff function
         self.exp = exp #Time to expiration
         self.strike = strike #Fixed strike price
         self.t_unit = t_unit
+        self.setBirthday(birthday)
 
     def rescale(self, t_unit):
         '''
@@ -47,6 +54,20 @@ class Option:
         1 = years, 360 = days, 12 = months, etc...
         '''
         self.t_unit = t_unit
+
+    def setBirthday(self, birthday):
+        '''
+        Set values for birthday cake payoff
+        '''
+        if type(birthday) != dict:
+            print("Error: birthday parameter must contain range and payout amounts in a dictionary")
+            sys.exit()
+
+        if len(birthday["rng"]) != len(birthday["pay"]):
+            print("Error: Range and Payoff values for Birthday cake must be equal.")
+            sys.exit()
+
+        self.birthday = birthday
 
 class AutoCall:
 	'''
@@ -93,6 +114,34 @@ def amPutVec(spot,op):
     '''
     result = op.strike - spot
     return result * (result > 0.0) #Takes max between 0 and value
+
+#American digital put payoff
+def amPutDigVec(spot,op):
+    '''
+    spot : vector of spot prices
+    op : option object
+    '''
+    result = op.strike - spot
+    return 1.0 * (result > 0.0) #Takes max between 0 and value
+
+#American digital call payoff
+def amCallDigVec(spot,op):
+    '''
+    spot : vector of spot prices
+    op : option object
+    '''
+    result = spot - op.strike
+    return 1.0 * (result > 0.0) #Takes max between 0 and value
+
+#Birthday cake digital option
+def birthdayVec(spot,op):
+    dev = abs(spot-op.strike) #Deviation from strike
+    result = (dev <= op.birthday["rng"][0])*1.0 #Initialize with highest payoff
+    for rg in range(1,len(op.birthday["rng"])): #Set remainder of cake
+        result = (dev <= op.birthday["rng"][rg])\
+        *(dev >= op.birthday["rng"][rg-1])\
+        *op.birthday["pay"][rg]+result #Check if value is within bound
+    return result
 
 #American put payoff
 def amPut(spot,op):
@@ -291,19 +340,19 @@ def getSim(stock, opt, paths, t_steps, t_del,\
     #result1 = np.mean(np.apply_along_axis(npPath,1,sim_ran))
     return np.array([npPath(x) for x in sim_ran])
 
-def getCont(Ct1,St,num_basis):
+def getCont(Ct1,St,kwargs):
     '''
     Get continuation value at time t. Assumes valid value at t+1
     Ct1 : discounted payoff from t+1
     St : stock prices at t
-    num_basis : number of basis elements to use
-    moneymask : index of paths in the money at t
+    kwargs holds:
+        num_basis : number of basis elements to use
     '''
     if len(St) == 0: return np.array([]) #If no paths are in the money
 
-    basis=np.eye(num_basis)
+    basis=np.eye(kwargs["num_basis"])
     #Evaluate St at laguerre basis
-    X=np.array([np.polynomial.laguerre.lagval(St,basis[x]) for x in range(0,num_basis)])
+    X=np.array([np.polynomial.laguerre.lagval(St,basis[x]) for x in range(0,kwargs["num_basis"])])
     X=np.transpose(X)
 
     #Fit regression coefficients
@@ -311,6 +360,23 @@ def getCont(Ct1,St,num_basis):
 
     #Return fitted values
     return np.matmul(X,betas)
+
+def getContRF(Ct1,St,kwargs={"num_trees":5,"max_depth":5,"min_samples_leaf":0.001}):
+    '''
+    Get continuation value at time t with Random Forest
+    Ct1 : discounted payoff from t+1
+    St : stock prices at t
+    kwargs holds:
+        num_trees : number of trees to use
+        max_depth : max depth of each tree
+    '''
+    if len(St) == 0: return np.array([]) #If no paths are in the money
+
+    clf=RandomForestRegressor(n_estimators=kwargs["num_trees"],\
+        max_depth=kwargs["max_depth"],min_samples_leaf=kwargs["min_samples_leaf"])
+    tempSt=np.reshape(St,(len(St),1))
+    clf.fit(tempSt,Ct1)
+    return clf.predict(tempSt)
 
 def getPV(C,g,P):
     '''
@@ -440,7 +506,7 @@ def jumpEx(stock,wt,T):
 
 
 def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
- anti=False,num_basis=5):
+ anti=False,regressor=getCont,kwargs={"num_basis":4}):
     '''
     Compute american payoff via LSM with brownian bridge
     stock : stock object
@@ -450,7 +516,11 @@ def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
     t_del : size of each time step
     anti : boolean to trigger antithetical variates ~ Will run
     double the amount of paths
-    num_basis : number of basis vectors to use in Laguerre expansion
+    regressor : type of regressor to use (function)
+    kwargs:
+        num_basis : number of basis vectors to use in Laguerre expansion -> least squares
+        num_trees : number of trees to use for random forests
+        max_depth : max depth for each tree in random forests
     '''
 
     timings = [0,0,0,0,0,0,0]
@@ -465,13 +535,9 @@ def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
     t0 = time.time()
     paths = 2*paths if anti else paths #Toggle antithetical variates
     Xt = np.random.normal(0,1,(paths,)) #Generate terminal values for W(t)
-    #Xt = np.array([jumpEx(stock,x,T) for x in Xt])
     Xt = jumpEx(stock,Xt,T)
     FP = stock.spot*np.exp(Xt)  #np.array([stock.spot*np.exp(x) for x in Xt]) #Final share price
-    #FO = np.array([opt.payoff(x,opt) for x in FP]) #Final Payoff
     FO = opt.payoff(FP,opt) #Final Payoff
-
-    #dt = 1/t_steps
 
     #Rescale stock and option to normal time step
     stock.rescale(t_unit)
@@ -487,7 +553,6 @@ def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
     #Start walk back
     for t in reversed(range(1,t_steps+1)):
         t0 = time.time()
-        #Xt = np.array([mc_Bridge(p,stock,(t+1,t+2),x) for x,p in zip(sim_ran[:,t-1],Xt)]) #Current state
         Xt = mc_BridgeVec(Xt,stock,(t-1,t),sim_ran[:,t-2])
         timings[1] = t0 - time.time()
 
@@ -509,7 +574,8 @@ def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
 
         t0 = time.time()
         Ct = np.zeros(paths)
-        Ct[moneymask] = getCont(FO[moneymask],St[moneymask],num_basis) #Obtain continuation values
+        Ct[moneymask] = regressor(FO[moneymask],St[moneymask],kwargs) #Obtain continuation values
+        #saveCont(FO[moneymask],St[moneymask],Ct[moneymask],t,regressor,stock,paths)
         timings[5] = t0 - time.time()
 
 
@@ -527,7 +593,34 @@ def bridgePayoffs(stock, opt, paths, t_steps, t_unit,\
 
     return FO
 
-def priceLSM(stock, opt, paths, t_steps, t_unit,anti=False,num_basis=5):
+def priceEur(stock, opt, paths, t_steps, t_unit,anti=False):
+    '''
+    To price products that are not path dependant
+    Simplified version of bridgePayoffs
+    '''
+    
+    T = t_steps/t_unit #Full duration of the product
+
+    #Rescale stock and option to units that span all time steps
+    stock.rescale(1/T)
+    opt.rescale(1/T)
+
+    paths = 2*paths if anti else paths #Toggle antithetical variates
+    Xt = np.random.normal(0,1,(paths,)) #Generate terminal values for W(t)
+    Xt = jumpEx(stock,Xt,T)
+    FP = stock.spot*np.exp(Xt)  #np.array([stock.spot*np.exp(x) for x in Xt]) #Final share price
+    FO = opt.payoff(FP,opt) #Final Payoff
+    FO = FO*np.exp(-stock.repo) #Discount back to present
+
+    #Rescale stock and option to normal time step
+    stock.rescale(t_unit)
+    opt.rescale(t_unit)
+
+    return np.mean(FO)
+
+
+def priceLSM(stock, opt, paths, t_steps, t_unit,\
+ anti=False,regressor=getCont,**kwargs):
     '''
     LSM with brownian bridge
     stock : stock object
@@ -540,5 +633,21 @@ def priceLSM(stock, opt, paths, t_steps, t_unit,anti=False,num_basis=5):
     double the amount of paths
     num_basis : number of basis vectors to use in Laguerre expansion
     '''
-    return np.mean(bridgePayoffs(stock, opt, paths, t_steps, t_unit,anti,num_basis))
+    return np.mean(bridgePayoffs(stock, opt, paths, t_steps, t_unit,anti,regressor,kwargs))
+
+def saveCont(FO,St,C,t,regressor,stock,paths):
+    '''
+    Save continuation values for analysis
+    FO : payoffs
+    St : stock prices
+    C : continuation values with FO and St
+    t : current time step
+    regressor : type of regression used
+    '''
+    if len(C) > 0:
+        mydic = {"payoff":FO,"stockp":St,"Continuation":C}
+        with open('results/step_' + str(t) + '_paths_' + str(paths) + '_'\
+         + str(regressor) + '_spot_' + str(stock.spot) + '.pkl', 'wb') as f:
+            pickle.dump(mydic, f)
+
 
